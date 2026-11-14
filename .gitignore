@@ -1,0 +1,17 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+target/
+build/
+.idea/
+*.iml
+work/
+.devlabs/
+coverage/
+
+.devlabs-backups/
+
+.devlabs-trials/

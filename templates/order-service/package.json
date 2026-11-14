@@ -1,0 +1,6 @@
+{
+  "name": "devlabs-order-service",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "start": "node start.cjs", "test": "node checks.cjs all" }
+}

@@ -36,7 +36,7 @@ test('teacher observes a failed exam, assigns concept practice, reviews changes,
   await route('answer',{questionId:q.id,answer:'wrong'});r=await route('answer',{questionId:q.id,answer:solve(q)});
   assert.equal(r.teaching.assignments[0].completedPasses,1);await route('answer',{questionId:q.id,answer:solve(q)},400);
   r=await route('teacher-practice',{assignmentId:assignedDuring.id});assert.notEqual(r.route.question.id,q.id);r=await route('answer',{questionId:r.route.question.id,answer:solve(r.route.question)});
-  assert.equal(r.teaching.assignments[0].status,'awaiting-review');assert.equal(r.route.units[0].passed,false);assert.equal(r.route.units[0].needs,0);
+  assert.equal(r.teaching.assignments[0].status,'awaiting-review');assert.equal(r.route.units[0].passed,false);assert.equal(r.route.units[0].needs,2,'unrelated teacher practice cannot clear the failed concept');
   await teach('review-assignment',{assignmentId:assignedDuring.id,verdict:'needs-practice',note:'换成新的表达式后仍不能解释更新顺序，需要再次验证。',help:'none'});
   let state=(await get('/api/state')).state;assert.equal(state.teaching.assignments[0].round,2);assert.equal(state.teaching.assignments[0].completedPasses,0);
   for(let i=0;i<2;i++){r=await route('teacher-practice',{assignmentId:assignedDuring.id});r=await route('answer',{questionId:r.route.question.id,answer:solve(r.route.question)});}
@@ -44,6 +44,7 @@ test('teacher observes a failed exam, assigns concept practice, reviews changes,
   state=(await get('/api/state')).state;assert.equal(state.teaching.assignments[0].status,'completed');assert.equal(state.teaching.assignments[0].reviews.length,2);assert.equal(state.route.units[0].passed,false);assert.equal(state.teaching.observations[0].note,note);
   await route('teacher-practice',{assignmentId:assignedDuring.id},400);
   const linked=(await teach('assign',{unitId:'values',variant:2,requiredPasses:1,reason:'用字符串连接的新例子检验数字与字符串的区别。',assessmentId:examId,observationId:observation.id})).result;assert.equal(linked.observationId,observation.id);
+  while(r.route.units[0].needs){r=await route('remediation-practice');r=await route('answer',{questionId:r.route.question.id,answer:solve(r.route.question)});}
   r=await route('unit-exam');while(!r.route.exam.finished)r=await route('answer',{questionId:r.route.question.id,answer:solve(r.route.question)});
   detail=await get('/api/teaching?unitId=values');assert.equal(detail.assessments.length,2);assert.equal(detail.assessments[0].passed,false);assert.equal(detail.assessments[1].passed,true);assert.equal(detail.teaching.assignments[0].attemptIds.length,5);assert.equal(detail.units[0].passed,true);
   const exported=await get('/api/export');assert.equal(exported.state.route.attempts,undefined);assert.equal(exported.state.route.exam.questions,undefined);assert.equal(exported.state.teaching.assignments[0].reviews.length,2);assert.equal(exported.routeEvidence.assessments.length,2);assert.ok(exported.routeEvidence.attempts.some(a=>a.answer==='wrong'));

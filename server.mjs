@@ -82,7 +82,7 @@ async function evaluate(task, body) {
   if (task.kind === 'project') {
     const result = await command(process.execPath, ['--permission', `--allow-fs-read=${PROJECT}`, `--allow-fs-write=${path.join(PROJECT, 'data')}`, '--allow-net', '--max-old-space-size=96', path.join(PROJECT, 'checks.cjs'), task.id === 's2-store' ? 'store' : task.id === 's2-api' ? 'api' : 'all'], { cwd: PROJECT, timeout: 9000, env: {DEVLABS_CASE_SEED:String(task.caseSeed||1700),DEVLABS_ROUTE_EXAM:task.projectExam?'1':'0'} });
     const parsed = parseOutput(result.output);
-    if (parsed.error) return { passed: false, error: parsed.error, checks: [], sourceHash: await projectHash() };
+    if (parsed.error) return { passed: false, error: parsed.error, diagnostic:parsed.diagnostic||null, checks: [], sourceHash: await projectHash() };
     const checks = parsed.results || [];
     if (task.id === 's2-delivery') {
       const count = await git(['rev-list', '--count', 'HEAD']);
@@ -95,16 +95,18 @@ async function evaluate(task, body) {
   }
   const code = task.kind === 'predict' ? task.starter : body.code;
   if (typeof code !== 'string' || code.length > 16000) throw new Error('代码不能为空或超过 16000 字符');
-  const result = await command(process.execPath, ['--permission', '--max-old-space-size=64', path.join(ROOT, 'lib/code-runner.mjs')], { input: JSON.stringify({ code, fn: task.fn, cases: task.cases || casesFor(task.id) }), timeout: 4000 });
+  const result = await command(process.execPath, ['--permission', `--allow-fs-read=${path.join(ROOT,'lib/execution-diagnostic.mjs')}`, '--max-old-space-size=64', path.join(ROOT, 'lib/code-runner.mjs')], { input: JSON.stringify({ code, fn: task.fn, cases: task.cases || casesFor(task.id) }), timeout: 4000 });
   const parsed = parseOutput(result.output);
-  if (parsed.error) return { passed: false, error: parsed.error, checks: [], sourceHash: digest(code) };
+  if (parsed.error) return { passed: false, error: parsed.error, diagnostic:parsed.diagnostic||null, checks: [], sourceHash: digest(code) };
   if (task.kind === 'predict') {
     const predicted = String(body.prediction || '').trim();
     const checks = [{ name: '运行前预测与实际输出一致', passed: predicted === parsed.output, actual: parsed.output, expected: predicted || '尚未填写预测' }];
     return { passed: checks[0].passed && parsed.output === task.expected, output: parsed.output, checks, sourceHash: digest(code) };
   }
-  const checks = (parsed.results || []).map(c => ({ ...c, passed: isDeepStrictEqual(c.actual, c.expected) }));
-  return { passed: result.code === 0 && checks.length > 0 && checks.every(c => c.passed), checks, sourceHash: digest(code) };
+  const checks = (parsed.results || []).map(c => ({ ...c, status:c.status==='unassessed'?'unassessed':!c.error&&isDeepStrictEqual(c.actual,c.expected)?'passed':'failed', passed: !c.error && isDeepStrictEqual(c.actual, c.expected) }));
+  const failedRun=checks.find(c=>c.error&&c.status!=='unassessed');
+  const status=checks.some(c=>c.status==='failed')?'failed':checks.some(c=>c.status==='unassessed')?'unassessed':result.code===0&&checks.length?'passed':'unassessed';
+  return {status, passed:status==='passed', checks, error:failedRun?.error||null, diagnostic:failedRun?.diagnostic||checks.find(c=>c.status==='unassessed')?.diagnostic||null, sourceHash:digest(code)};
 }
 function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); }
 async function bodyOf(req) {
@@ -289,7 +291,7 @@ export function createServer() {
         } finally { busy = false; }
       }
       if (req.method !== 'GET') return json(res, 405, { error: '不支持的方法' });
-      const staticFiles = { '/': 'index.html', '/app.js': 'app.js', '/learning-flow.js': 'learning-flow.js', '/completion-policy.js': 'completion-policy.js', '/journey.js': 'journey.js', '/lesson-world.js':'lesson-world.js', '/order-world.js':'order-world.js', '/learning-machine.js':'learning-machine.js', '/experiment.js':'experiment.js', '/task-reference.js':'task-reference.js', '/labs.js':'labs.js', '/teaching.js':'teaching.js', '/workspaces.js':'workspaces.js', '/route.js':'route.js', '/unit.js':'unit.js', '/style.css': 'style.css' };
+      const staticFiles = { '/': 'index.html', '/app.js': 'app.js', '/learning-flow.js': 'learning-flow.js', '/completion-policy.js': 'completion-policy.js', '/journey.js': 'journey.js', '/lesson-world.js':'lesson-world.js', '/order-world.js':'order-world.js', '/learning-machine.js':'learning-machine.js', '/experiment.js':'experiment.js', '/task-reference.js':'task-reference.js', '/code-editor.js':'code-editor.js', '/run-feedback.js':'run-feedback.js', '/labs.js':'labs.js', '/teaching.js':'teaching.js', '/workspaces.js':'workspaces.js', '/route.js':'route.js', '/unit.js':'unit.js', '/style.css': 'style.css' };
       const file = staticFiles[url.pathname]; if (!file) return json(res, 404, { error: '页面不存在' });
       const content = await fs.readFile(path.join(ROOT, 'public', file));
       res.writeHead(200, { 'content-type': file.endsWith('.html') ? 'text/html; charset=utf-8' : file.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(content);

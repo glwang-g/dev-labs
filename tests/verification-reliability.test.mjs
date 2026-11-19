@@ -1,3 +1,4 @@
+import {debugSolution} from './debug-fixtures.mjs';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -43,7 +44,7 @@ test('validation remediation and human verification work end to end, preserving 
  const privateState=async()=>JSON.parse(await fs.readFile(path.join(dir,'state.json'),'utf8'));
  const restore=async state=>{await fs.writeFile(path.join(dir,'state.json'),JSON.stringify(state));await initialize();};
  const open=async labId=>{let r=await api('select',{labId});if(r.route.lab.entry.status==='pending')await api('diagnostic-skip');return api('practice',{labId});};
- const solve=async(useClosure=true,wrongFirst=false)=>{const state=await privateState(),q=state.route.exam.questions[state.route.exam.index];let code;if(q.unitId==='aggregate')code=q.variant===0?sum.replace('sumPaid','report'):q.variant===1?group.replace('groupPaid','report'):q.variant===2?summary:useClosure?closure:flat;else code=q.fn==='validTotal'?valid:q.fn==='buildReport'?build:q.fn==='countEligible'?`function countEligible(orders,min){return orders.filter(o=>o.status==='paid'&&o.amount>=min).length;}`:undefined;if(wrongFirst)code='function report(){return -99;}';return api('answer',{questionId:q.id,code,answer:q.expected});};
+ const solve=async(useClosure=true,wrongFirst=false)=>{const state=await privateState(),q=state.route.exam.questions[state.route.exam.index];let code;if(q.unitId==='aggregate')code=q.variant===0?sum.replace('sumPaid','report'):q.variant===1?group.replace('groupPaid','report'):q.variant===2?summary:useClosure?closure:flat;else code=q.unitId==='debug'?debugSolution(q):q.fn==='validTotal'?valid:q.fn==='buildReport'?build:q.fn==='countEligible'?`function countEligible(orders,min){return orders.filter(o=>o.status==='paid'&&o.amount>=min).length;}`:undefined;if(wrongFirst)code='function report(){return -99;}';return api('answer',{questionId:q.id,code,answer:q.expected});};
  try{
   let r;for(let i=0;i<4;i++){r=await open('js-orders-validation-'+i);r=await api('answer',{questionId:r.route.question.id,code:valid});assert.equal(r.route.lab.lastResult.passed,true);}
   r=await api('unit-exam');while(!r.route.exam.finished)r=await api('answer',{questionId:r.route.question.id,code:valid.replace('Number.isSafeInteger','Number.isInteger')});

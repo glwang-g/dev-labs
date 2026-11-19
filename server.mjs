@@ -1,3 +1,7 @@
+import {createAccounts} from './lib/accounts.mjs';
+import {randomUUID} from 'node:crypto';
+import {createClubProject} from './lib/club-project.mjs';
+import {upgradeDebug} from './lib/debug-upgrade.mjs';
 import {upgradeAggregate} from './lib/aggregate-upgrade.mjs';
 import {archiveAssessment,publicTeaching,teachingReport,handleTeaching} from './lib/teaching-service.mjs';
 import {handleRoute,publicRoute} from './lib/route-service.mjs';
@@ -21,8 +25,28 @@ import { stageCompletion, nextStageTask } from './public/journey.js';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const requestedData = path.resolve(process.env.DEVLABS_DATA_DIR || path.join(ROOT, '.devlabs'));
 await fs.mkdir(requestedData, { recursive: true });
-const DATA = await fs.realpath(requestedData);
+const BASE = await fs.realpath(requestedData);
+export function command(bin, args, { cwd = ROOT, input, timeout = 7000, env = {}, home = BASE } = {}) {
+  return new Promise(resolve => {
+    const child = spawn(bin, args, { cwd, env: { PATH: process.env.PATH, HOME: home, LANG: 'en_US.UTF-8', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let output = '', expired = false, settled = false;
+    const finish = result => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
+    const timer = setTimeout(() => { expired = true; child.kill('SIGKILL'); }, timeout);
+    const capture = chunk => { output += chunk.toString(); if (output.length > 60000) { output = output.slice(0, 60000); child.kill('SIGKILL'); } };
+    child.stdout.on('data', capture); child.stderr.on('data', capture);
+    child.on('error', e => finish({ code: 1, output: e.message }));
+    child.on('close', code => finish({ code, output: expired ? '执行超时，已停止。' : output }));
+    child.stdin.on('error', () => {}); child.stdin.end(input || '');
+  });
+}
+function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); }
+async function bodyOf(req) {
+  let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 100000) throw new Error('请求内容过大'); }
+  return body ? JSON.parse(body) : {};
+}
+function createWorkspace(DATA) {
 const PROJECT = path.join(DATA, 'order-service');
+const runCommand = (bin,args,options={}) => command(bin,args,{...options,home:DATA});
 const editable = ['store.cjs', 'app.cjs', 'README.md'];
 const projectFiles = [...editable, 'package.json', 'start.cjs', 'checks.cjs'];
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -35,7 +59,8 @@ async function persist() {
   await fs.rename(path.join(DATA, 'state.json.tmp'), path.join(DATA, 'state.json'));
 }
 function moveTask(id, action) { state.machines ||= {}; const from=state.machines[id] || 'ready'; const to=transitionLearning(from,action);state.machines[id]=to;record('learning.'+action,{taskId:id,from,to});return to; }
-export async function initialize() {
+async function initialize() {
+  await fs.mkdir(DATA, {recursive:true,mode:0o700});
   await fs.mkdir(path.join(PROJECT, 'data'), { recursive: true });
   for (const file of projectFiles) {
     const target = path.join(PROJECT, file);
@@ -46,33 +71,20 @@ export async function initialize() {
   await fs.writeFile(path.join(PROJECT, '.gitignore'), 'data/\nnode_modules/\n');
   try { state = JSON.parse(await fs.readFile(path.join(DATA, 'state.json'), 'utf8')); }
   catch (e) { if (e.code !== 'ENOENT') throw new Error('学习记录损坏，请先备份 .devlabs/state.json 后检查；不会自动覆盖。'); state = { version: 1, participantKind:process.env.DEVLABS_PARTICIPANT_KIND || 'learner', drafts: {}, attempts: [], hints: {}, aiUses: {}, reviews: {}, retests: {} }; await persist(); }
-  upgradeAggregate(state);archiveAssessment(state.route);
+  upgradeAggregate(state);upgradeDebug(state);archiveAssessment(state.route);
   for (const [id, value] of Object.entries(state.machines || {})) if(value === 'validating') { state.machines[id]='repair';record('learning.interrupted',{taskId:id,from:value,to:'repair'}); }
   await persist();
   const exists = await fs.access(path.join(PROJECT, '.git')).then(() => true, () => false);
   if (!exists) {
     for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'DevLabs Learner'], ['config', 'user.email', 'learner@devlabs.local'], ['add', '.'], ['commit', '-m', 'chore: start order service exercise']]) {
-      const result = await command('git', args, { cwd: PROJECT });
+      const result = await runCommand('git', args, { cwd: PROJECT });
       if (result.code !== 0) throw new Error('练习仓库初始化失败：' + result.output);
     }
   }
 }
-export function command(bin, args, { cwd = ROOT, input, timeout = 7000, env = {} } = {}) {
-  return new Promise(resolve => {
-    const child = spawn(bin, args, { cwd, env: { PATH: process.env.PATH, HOME: DATA, LANG: 'en_US.UTF-8', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
-    let output = '', expired = false, settled = false;
-    const finish = result => { if (!settled) { settled = true; clearTimeout(timer); resolve(result); } };
-    const timer = setTimeout(() => { expired = true; child.kill('SIGKILL'); }, timeout);
-    const capture = chunk => { output += chunk.toString(); if (output.length > 60000) { output = output.slice(0, 60000); child.kill('SIGKILL'); } };
-    child.stdout.on('data', capture); child.stderr.on('data', capture);
-    child.on('error', e => finish({ code: 1, output: e.message }));
-    child.on('close', code => finish({ code, output: expired ? '执行超时，已停止。' : output }));
-    child.stdin.on('error', () => {}); child.stdin.end(input || '');
-  });
-}
 async function files() { return Object.fromEntries(await Promise.all(projectFiles.map(async f => [f, await fs.readFile(path.join(PROJECT, f), 'utf8')]))); }
 async function projectHash() { const all = await files(); return digest(Object.fromEntries(editable.map(f => [f, all[f]]))); }
-async function git(args) { return command('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: PROJECT }); }
+async function git(args) { return runCommand('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd: PROJECT }); }
 function taskById(id) { const task = tasks.find(t => t.id === id); if (!task) throw new Error('任务不存在'); return task; }
 function parseOutput(output) {
   for (const line of output.trim().split('\n').reverse()) { try { return JSON.parse(line); } catch {} }
@@ -80,7 +92,7 @@ function parseOutput(output) {
 }
 async function evaluate(task, body) {
   if (task.kind === 'project') {
-    const result = await command(process.execPath, ['--permission', `--allow-fs-read=${PROJECT}`, `--allow-fs-write=${path.join(PROJECT, 'data')}`, '--allow-net', '--max-old-space-size=96', path.join(PROJECT, 'checks.cjs'), task.id === 's2-store' ? 'store' : task.id === 's2-api' ? 'api' : 'all'], { cwd: PROJECT, timeout: 9000, env: {DEVLABS_CASE_SEED:String(task.caseSeed||1700),DEVLABS_ROUTE_EXAM:task.projectExam?'1':'0'} });
+    const result = await runCommand(process.execPath, ['--permission', `--allow-fs-read=${PROJECT}`, `--allow-fs-write=${path.join(PROJECT, 'data')}`, '--allow-net', '--max-old-space-size=96', path.join(PROJECT, 'checks.cjs'), task.id === 's2-store' ? 'store' : task.id === 's2-api' ? 'api' : 'all'], { cwd: PROJECT, timeout: 9000, env: {DEVLABS_CASE_SEED:String(task.caseSeed||1700),DEVLABS_ROUTE_EXAM:task.projectExam?'1':'0'} });
     const parsed = parseOutput(result.output);
     if (parsed.error) return { passed: false, error: parsed.error, diagnostic:parsed.diagnostic||null, checks: [], sourceHash: await projectHash() };
     const checks = parsed.results || [];
@@ -95,7 +107,7 @@ async function evaluate(task, body) {
   }
   const code = task.kind === 'predict' ? task.starter : body.code;
   if (typeof code !== 'string' || code.length > 16000) throw new Error('代码不能为空或超过 16000 字符');
-  const result = await command(process.execPath, ['--permission', `--allow-fs-read=${path.join(ROOT,'lib/execution-diagnostic.mjs')}`, '--max-old-space-size=64', path.join(ROOT, 'lib/code-runner.mjs')], { input: JSON.stringify({ code, fn: task.fn, cases: task.cases || casesFor(task.id) }), timeout: 4000 });
+  const result = await runCommand(process.execPath, ['--permission', `--allow-fs-read=${path.join(ROOT,'lib/execution-diagnostic.mjs')}`, '--max-old-space-size=64', path.join(ROOT, 'lib/code-runner.mjs')], { input: JSON.stringify({ code, fn: task.fn, cases: task.cases || casesFor(task.id) }), timeout: 4000 });
   const parsed = parseOutput(result.output);
   if (parsed.error) return { passed: false, error: parsed.error, diagnostic:parsed.diagnostic||null, checks: [], sourceHash: digest(code) };
   if (task.kind === 'predict') {
@@ -108,26 +120,25 @@ async function evaluate(task, body) {
   const status=checks.some(c=>c.status==='failed')?'failed':checks.some(c=>c.status==='unassessed')?'unassessed':result.code===0&&checks.length?'passed':'unassessed';
   return {status, passed:status==='passed', checks, error:failedRun?.error||null, diagnostic:failedRun?.diagnostic||checks.find(c=>c.status==='unassessed')?.diagnostic||null, sourceHash:digest(code)};
 }
-function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); }
-async function bodyOf(req) {
-  let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 100000) throw new Error('请求内容过大'); }
-  return body ? JSON.parse(body) : {};
-}
-export function createServer() {
-  return http.createServer(async (req, res) => {
-    res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('referrer-policy', 'no-referrer');
-    const localHost = `127.0.0.1:${req.socket.localPort}`;
-    if (![localHost, `localhost:${req.socket.localPort}`].includes(req.headers.host)) return json(res, 403, { error: '只允许本机访问' });
-    if (req.headers.origin && ![`http://${localHost}`, `http://localhost:${req.socket.localPort}`].includes(req.headers.origin)) return json(res, 403, { error: '来源不匹配' });
-    if (req.method === 'POST' && !req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: '需要 JSON 请求' });
-    const url = new URL(req.url, `http://${localHost}`);
+const handleClubProject = createClubProject({ directory: path.join(DATA, 'club-signup'), template: path.join(ROOT, 'templates/club-signup'), command: runCommand, evaluate });
+
+async function handle(req, res, url, principal) {
     try {
       if (req.method === 'GET' && url.pathname === '/api/experiment/export') {
         const session=state.experiments?.[url.searchParams.get('id')]; if(!session) throw new Error('实验不存在');
         res.setHeader('content-disposition','attachment; filename="order-experiment.json"'); return json(res,200,{session,world:replayWorld(session)});
       }
       if (req.method === 'GET' && url.pathname === '/api/teaching') return json(res,200,teachingReport(state,url.searchParams.get('unitId'),publicRoute(state.route)));
+      if (principal?.role === 'teacher' && req.method === 'GET' && url.pathname === '/api/state') {
+        const route = state.route ? publicRoute(state.route) : null;
+        const {step, startedAt, signupPassedAt, secondStartedAt, hints, observations, commit, feedback} = state.clubProject || {};
+        const exam = route?.exam;
+        return json(res,200,{ tasks:publicTasks(), stages, state:{
+          route:route ? {units:route.units,stages:route.stages,events:route.events,selected:route.selected,exam:exam?{finished:exam.finished,paused:exam.paused,target:exam.target,stage:exam.stage,index:exam.index,total:exam.total,passed:exam.passed,status:exam.status,weak:exam.weak}:null}:null,
+          clubProject:step===undefined?null:{step,startedAt,signupPassedAt,secondStartedAt,hints,observations,commit,feedback},
+          attempts:[],drafts:{},reviews:{},teaching:publicTeaching(state)
+        } });
+      }
       if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, { tasks: publicTasks(), stages, state:outwardState(), project: await files(), projectPath: PROJECT, ai: Boolean(process.env.AI_BASE_URL && process.env.AI_API_KEY && process.env.AI_MODEL) });
       if (req.method === 'GET' && url.pathname === '/api/template') {
         const file = url.searchParams.get('file');
@@ -140,7 +151,22 @@ export function createServer() {
         busy = true;
         try {
           const body = await bodyOf(req);
+          if (url.pathname === '/api/club-feedback') {
+            if (!state.clubProject) throw new Error('学员尚未开始社团项目。');
+            const note=String(body.note || '').trim().slice(0,1500);
+            if (!note) throw new Error('请先填写反馈。');
+            const feedback=state.clubProject.feedback ||= [];
+            feedback.push({note,teacher:principal.name,at:now()});
+            state.clubProject.feedback=feedback.slice(-50);
+            await persist();
+            return json(res,200,{saved:true});
+          }
           if(url.pathname==='/api/teaching'){const result=handleTeaching(state,body,publicRoute(state.route));await persist();return json(res,200,{saved:true,result,teaching:publicTeaching(state)});}
+          if (url.pathname === '/api/club-project') {
+            const result = await handleClubProject(state, body);
+            await persist();
+            return json(res, 200, result);
+          }
           if(url.pathname==='/api/route') {
             const result=await handleRoute(state,body,async(q,b)=>{
               if(q.kind==='choice')return {passed:String(b.answer)===q.expected,checks:[],sourceHash:digest(q.brief)};
@@ -261,7 +287,7 @@ export function createServer() {
             const allowed = { status: ['status', '--short'], diff: ['diff', 'HEAD', '--', ...editable], log: ['log', '-5', '--oneline'], test: null, commit: null };
             if (!Object.hasOwn(allowed, body.action)) throw new Error('不支持的操作');
             let result;
-            if (body.action === 'test') { result = await command(process.execPath, ['--permission', `--allow-fs-read=${PROJECT}`, `--allow-fs-write=${path.join(PROJECT, 'data')}`, '--allow-net', '--max-old-space-size=96', path.join(PROJECT, 'checks.cjs'), 'all'], { cwd: PROJECT, timeout: 9000 }); }
+            if (body.action === 'test') { result = await runCommand(process.execPath, ['--permission', `--allow-fs-read=${PROJECT}`, `--allow-fs-write=${path.join(PROJECT, 'data')}`, '--allow-net', '--max-old-space-size=96', path.join(PROJECT, 'checks.cjs'), 'all'], { cwd: PROJECT, timeout: 9000 }); }
             else if (body.action === 'commit') {
               const message = String(body.message || '').trim(); if (message.length < 8 || message.length > 120) throw new Error('提交说明需为 8–120 个字符');
               await git(['add', '--', ...editable]); result = await git(['commit', '-m', message]);
@@ -291,16 +317,117 @@ export function createServer() {
         } finally { busy = false; }
       }
       if (req.method !== 'GET') return json(res, 405, { error: '不支持的方法' });
-      const staticFiles = { '/': 'index.html', '/app.js': 'app.js', '/learning-flow.js': 'learning-flow.js', '/completion-policy.js': 'completion-policy.js', '/journey.js': 'journey.js', '/lesson-world.js':'lesson-world.js', '/order-world.js':'order-world.js', '/learning-machine.js':'learning-machine.js', '/experiment.js':'experiment.js', '/task-reference.js':'task-reference.js', '/code-editor.js':'code-editor.js', '/run-feedback.js':'run-feedback.js', '/labs.js':'labs.js', '/teaching.js':'teaching.js', '/workspaces.js':'workspaces.js', '/route.js':'route.js', '/unit.js':'unit.js', '/style.css': 'style.css' };
+      const staticFiles = { '/': 'index.html', '/app.js': 'app.js', '/accounts.js':'accounts.js', '/account-api.js':'account-api.js', '/club-project.js': 'club-project.js', '/learning-flow.js': 'learning-flow.js', '/completion-policy.js': 'completion-policy.js', '/journey.js': 'journey.js', '/lesson-world.js':'lesson-world.js', '/order-world.js':'order-world.js', '/learning-machine.js':'learning-machine.js', '/experiment.js':'experiment.js', '/task-reference.js':'task-reference.js', '/code-editor.js':'code-editor.js', '/run-feedback.js':'run-feedback.js', '/debug-workbench.js':'debug-workbench.js', '/labs.js':'labs.js', '/teaching.js':'teaching.js', '/workspaces.js':'workspaces.js', '/route.js':'route.js', '/unit.js':'unit.js', '/style.css': 'style.css' };
       const file = staticFiles[url.pathname]; if (!file) return json(res, 404, { error: '页面不存在' });
       const content = await fs.readFile(path.join(ROOT, 'public', file));
       res.writeHead(200, { 'content-type': file.endsWith('.html') ? 'text/html; charset=utf-8' : file.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8', 'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" }); res.end(content);
     } catch (e) { json(res, 400, { error: e.message?.slice(0, 2500) || '操作失败' }); }
-  });
+
 }
+return {initialize, handle};
+}
+
+const legacy = createWorkspace(BASE);
+export const initialize = legacy.initialize;
+export function createServer({ accountMode = false } = {}) {
+  const accounts = accountMode ? createAccounts(path.join(BASE,'accounts.sqlite')) : null;
+  const workspaces = new Map();
+  async function workspaceFor(principal) {
+    const id = principal.id;
+    if (!workspaces.has(id)) {
+      const workspace=createWorkspace(path.join(BASE,principal.role==='guest'?'guests':'learners',id));
+      const opening=workspace.initialize().then(()=>workspace).catch(error=>{workspaces.delete(id);throw error;});
+      workspaces.set(id,opening);
+    }
+    return workspaces.get(id);
+  }
+
+  const server = http.createServer(async (req,res)=>{
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    const localHost = `127.0.0.1:${req.socket.localPort}`;
+    if (![localHost, `localhost:${req.socket.localPort}`].includes(req.headers.host)) return json(res, 403, { error: '只允许本机访问' });
+    if (req.headers.origin && ![`http://${localHost}`, `http://localhost:${req.socket.localPort}`].includes(req.headers.origin)) return json(res, 403, { error: '来源不匹配' });
+    if (req.method === 'POST' && !req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: '需要 JSON 请求' });
+    const url = new URL(req.url, `http://${localHost}`);
+    try {
+      const principal=accounts?.session(req);
+      if (url.pathname==='/api/session' && req.method==='GET') {
+        return json(res,200,{enabled:accountMode, principal:principal||null,...accounts?.list(principal)});
+      }
+      if (!accountMode || !url.pathname.startsWith('/api/')) {
+        if (url.pathname==='/api/club-feedback') return json(res,404,{error:'请在账号模式使用教师反馈。'});
+        return await legacy.handle(req,res,url);
+      }
+
+      if (url.pathname==='/api/session' && req.method==='POST') {
+        const body=await bodyOf(req);
+        let next;
+        if (body.action==='guest') {
+          if (principal) return json(res,409,{error:'当前浏览器已有会话，请先退出。'});
+          next={role:'guest',id:randomUUID()};
+        } else if (body.action==='logout') {
+          if (!principal || req.headers['x-devlabs-account']!==principal.id) return json(res,409,{error:'会话已改变，请刷新页面。'});
+          accounts.abandon(req);
+          res.setHeader('set-cookie','devlabs_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+          return json(res,200,{ok:true});
+        } else if (['register','login'].includes(body.action)) {
+          if (principal && principal.role!=='guest') return json(res,409,{error:'请先退出当前账号。'});
+          accounts.throttle(body);
+          next=body.action==='register' ? await accounts.add(body,'student') : await accounts.authenticate(body);
+          // Keep an anonymous project's records in its own workspace.
+          if (principal) accounts.abandon(req);
+        } else return json(res,400,{error:'未知的账号操作。'});
+        accounts.newSession(res,next);
+        return json(res,200,{principal:next});
+      }
+
+      if (!principal) return json(res,401,{error:'请先登录或进入匿名体验。'});
+      if (req.headers['x-devlabs-account']!==principal.id) return json(res,409,{error:'会话已改变，请刷新页面。'});
+
+      if (url.pathname==='/api/relationships' && req.method==='POST') {
+        accounts.changeRelation(principal,await bodyOf(req));
+        return json(res,200,accounts.list(principal));
+      }
+
+      let owner=principal;
+      if (principal.role==='teacher') {
+        const learnerId=req.headers['x-devlabs-learner'];
+        const teacherAccess=req.method==='GET' && ['/api/state','/api/teaching'].includes(url.pathname)
+          || req.method==='POST' && ['/api/teaching','/api/club-feedback'].includes(url.pathname);
+        if (!teacherAccess || typeof learnerId!=='string' || !accounts.active(learnerId,principal.id)) {
+          return json(res,403,{error:'只能查看和指导与你已绑定的学生。'});
+        }
+        owner={id:learnerId,role:'student'};
+      } else if (url.pathname==='/api/club-feedback' ||
+        req.method==='POST' && ['/api/teaching','/api/review','/api/pilot'].includes(url.pathname)) {
+        return json(res,403,{error:'此操作需要教师身份。'});
+      }
+      const workspace=await workspaceFor(owner);
+      if (principal.role==='teacher' && !accounts.active(owner.id,principal.id)) return json(res,403,{error:'师生关系已解除。'});
+      return await workspace.handle(req,res,url,principal);
+    } catch(error) {
+      return json(res,error.status || 400,{error:error.message?.slice(0,500) || '操作失败'});
+    }
+  });
+  server.on('close',()=>accounts?.close());
+  return server;
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (Number(process.versions.node.split('.')[0]) < 25) throw new Error('请使用 Node.js 25.8 或更高版本');
-  await initialize();
-  const server = createServer(); const port = Number(process.env.PORT || 4317);
-  server.listen(port, '127.0.0.1', () => console.log(`DevLabs：http://127.0.0.1:${port}\n练习工程：${PROJECT}`));
+  if (process.argv[2] === 'create-teacher') {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    const accounts = createAccounts(path.join(BASE,'accounts.sqlite'));
+    try {
+      const created = await accounts.add(JSON.parse(Buffer.concat(chunks).toString()),'teacher');
+      console.log('教师账号已开通：'+created.email);
+    } finally {accounts.close();}
+  } else {
+    const accountMode=process.env.DEVLABS_ACCOUNTS==='1';
+    if (!accountMode) await initialize();
+    const server=createServer({accountMode}), port=Number(process.env.PORT || 4317);
+    server.listen(port,'127.0.0.1',()=>console.log(`DevLabs：http://127.0.0.1:${port}（${accountMode?'账号与匿名体验':'单学员'}）`));
+  }
 }

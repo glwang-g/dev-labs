@@ -1,3 +1,4 @@
+import {apiFetch, session as accountSession} from './account-api.js';
 const escape = x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export function experimentMarkup() { return `<section class="panel order-experiment"><div class="panel-head">小店实验 · 预测、步进与回放<span class="muted">业务步骤，非源码单步调试</span></div><div class="below-body"><p>逐笔处理订单，观察状态如何变化。实验帮助理解；任务通关仍由真实代码测试决定。</p><button data-world="start">打开订单实验</button><div id="world-content" aria-live="polite"></div></div></section>`; }
 export function bindExperiment(taskId) {
@@ -6,7 +7,7 @@ export function bindExperiment(taskId) {
   async function call(action, extra={}) {
     if(busy)return; busy=true;root.querySelectorAll('button').forEach(b=>b.disabled=true);
     try {
-      const r=await fetch('/api/experiment',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,taskId,id:session?.id,cursor,...extra})});
+      const r=await apiFetch('/api/experiment',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,taskId,id:session?.id,cursor,...extra})});
       const data=await r.json();if(!r.ok)throw new Error(data.error);
       session=data.session;cursor=data.cursor; draw(data);
     }catch(e){document.querySelector('#world-content').textContent=e.message;}

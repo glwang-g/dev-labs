@@ -1,8 +1,9 @@
+import {apiFetch, session as accountSession} from './account-api.js';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 export function unitMarkup(){return `<div class="intro"><div><div class="eyebrow">ABILITY PATH · S0</div><h1>条件分支：练会，再考过。</h1><p>单元训练覆盖真假、边界和多分支。六种情境练习完成，只解锁考核；三项能力各两道未见变式全部通过，才算本单元通关。</p></div></div><section class="panel"><div id="unit-body" class="below-body">正在恢复进度…</div></section>`;}
 export function bindUnit() {
   let busy=false;
-  async function call(action,extra={}) {if(busy)return;busy=true;const old=document.querySelector('#unit-body');old.querySelectorAll('button,input').forEach(x=>x.disabled=true);try{const r=await fetch('/api/unit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,...extra})});const value=await r.json();if(!r.ok)throw new Error(value.error);draw(value.unit,value.feedback);}catch(e){let msg=document.querySelector('#unit-error');if(!msg){msg=document.createElement('p');msg.id='unit-error';msg.setAttribute('role','alert');old.append(msg);}msg.textContent=e.message;old.querySelectorAll('button,input').forEach(x=>x.disabled=false);}finally{busy=false;}}
+  async function call(action,extra={}) {if(busy)return;busy=true;const old=document.querySelector('#unit-body');old.querySelectorAll('button,input').forEach(x=>x.disabled=true);try{const r=await apiFetch('/api/unit',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,...extra})});const value=await r.json();if(!r.ok)throw new Error(value.error);draw(value.unit,value.feedback);}catch(e){let msg=document.querySelector('#unit-error');if(!msg){msg=document.createElement('p');msg.id='unit-error';msg.setAttribute('role','alert');old.append(msg);}msg.textContent=e.message;old.querySelectorAll('button,input').forEach(x=>x.disabled=false);}finally{busy=false;}}
   function draw(u,feedback){
     const root=document.querySelector('#unit-body');if(!root)return;
     const q=u.question, last=u.exams.at(-1);

@@ -1,3 +1,5 @@
+import {apiFetch, session as accountSession} from './account-api.js';
+import {bindClub} from './club-project.js';
 import {teachingMarkup,bindTeaching,studentFeedbackMarkup} from './teaching.js';
 import {workspaces, workspaceFor, workspacePage, teacherOverview} from './workspaces.js';
 import {routeMarkup,bindRoute} from './route.js';
@@ -8,19 +10,21 @@ import { completionPolicy, completionSatisfied, canAutoAdvance } from './complet
 import { resumeJourney, nextLearningTask } from './journey.js';
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-let pendingLab=new URLSearchParams(location.search).get('lab');
-let workspace = pendingLab?'student':workspaceFor(localStorage.getItem('devlabs-workspace'));
-const workspaceViews = {student:'route', teacher:'overview'};
+const prefix=accountSession.enabled?accountSession.principal.id+':':'';
+const deviceStore={getItem:key=>localStorage.getItem(prefix+key),setItem:(key,value)=>localStorage.setItem(prefix+key,value)};
+let pendingLab=accountSession.principal?.role==='teacher' ? null : new URLSearchParams(location.search).get('lab');
+let workspace = accountSession.enabled ? (accountSession.principal.role==='teacher'?'teacher':'student') : pendingLab?'student':workspaceFor(deviceStore.getItem('devlabs-workspace'));
+const workspaceViews = {student:pendingLab?'route':'club', teacher:'overview'};
 let viewController, navigating = false, pendingTeacherAssignment=null;
-let teacherUnit=localStorage.getItem('devlabs-teacher-unit')||'values';
+let teacherUnit=deviceStore.getItem('devlabs-teacher-unit')||'values';
 const workspaceDrafts = new Map();
-let data, current = localStorage.getItem('devlabs-current') || 's0-state', view = workspaces[workspace].home, selectedFile = '', latest = null, terminal = '', aiAnswer = '', running = false;
+let data, current = deviceStore.getItem('devlabs-current') || 's0-state', view = pendingLab ? 'route' : workspaces[workspace].home, selectedFile = '', latest = null, terminal = '', aiAnswer = '', running = false;
 let queue = Promise.resolve(), saveTimer, toastTimer, helpOpen = false, advanceTimer, pendingAdvance = null;
 let stageDialog = null, stageTimer;
 const dirtyFiles = new Map();
 const draftMemory = {};
 async function request(url, body) {
-  const response = await fetch(url, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const response = await apiFetch(url, body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const result = await response.json(); if (!response.ok) throw new Error(result.error || '操作失败'); return result;
 }
 function post(url, body) { const op = queue.catch(() => {}).then(() => request(url, body)); queue = op; return op; }
@@ -41,8 +45,8 @@ async function flush() {
 function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(() => flush().then(() => { if ($('#save-state')) $('#save-state').textContent = '已保存到本机'; }).catch(e => { if ($('#save-state')) $('#save-state').textContent = '保存失败，请重试'; toast(e.message); }), 800); if ($('#save-state')) $('#save-state').textContent = '正在保存…'; }
 async function refresh() { data = await request('/api/state'); }
 function layout(content) {
-  const config = workspaces[workspace], page = config.pages.find(p=>p.id===view);
-  return `<div class="app-shell" data-workspace="${workspace}"><aside class="sidebar"><div class="brand"><span class="brand-mark">d/</span>DevLabs <small>ALPHA</small></div><div class="side-caption">${config.title}</div><nav class="side-nav" aria-label="${config.title}导航">${config.pages.map(p=>`<button data-view="${p.id}" class="${view===p.id?'active':''}" ${view===p.id?'aria-current="page"':''}>${p.label}</button>`).join('')}</nav><div class="sidebar-bottom">${workspace==='teacher'?'观察，追问，帮助学生前进。':'理解，实践，然后证明。'}<a href="https://codemuseum.freexlib.com" target="_blank" rel="noreferrer">CodeMuseum ↗</a><a href="https://labs.freexlib.com" target="_blank" rel="noreferrer">xshow ↗</a><span>本机单学员 · JavaScript 路线<br>${workspace==='teacher'?'训练、考核与教师观察分别记录。':'AI 辅助，理解由你完成。'}</span></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">${config.title} &nbsp; / &nbsp; <strong>${page?.title||''}</strong></div><div class="profile"><div class="workspace-switch" role="group" aria-label="切换工作台">${[['student','学生'],['teacher','教师']].map(([id,label])=>`<button type="button" data-workspace-switch="${id}" aria-pressed="${workspace===id}" ${workspace===id?'class="selected"':''}>${label}</button>`).join('')}</div><span class="local-profile"><span class="dot"></span> 本机体验</span></div></header><div class="content">${content}<div class="footer-note">DevLabs α · 测试通过与能力掌握分别记录。独立性由现场变式与追问复核，本机记录不作为认证成绩。</div></div></main></div>`;
+  const config = workspaces[workspace], pages=accountSession.learnerId?config.pages.filter(x=>['overview','teaching'].includes(x.id)):config.pages, page = config.pages.find(p=>p.id===view);
+  return `<div class="app-shell" data-workspace="${workspace}"><aside class="sidebar"><div class="brand"><span class="brand-mark">d/</span>DevLabs <small>ALPHA</small></div><div class="side-caption">${config.title}</div><nav class="side-nav" aria-label="${config.title}导航">${pages.map(p=>`<button data-view="${p.id}" class="${view===p.id?'active':''}" ${view===p.id?'aria-current="page"':''}>${p.label}</button>`).join('')}</nav><div class="sidebar-bottom">${workspace==='teacher'?'观察，追问，帮助学生前进。':'理解，实践，然后证明。'}<a href="https://codemuseum.freexlib.com" target="_blank" rel="noreferrer">CodeMuseum ↗</a><a href="https://labs.freexlib.com" target="_blank" rel="noreferrer">xshow ↗</a><span>本机单学员 · JavaScript 路线<br>${workspace==='teacher'?'训练、考核与教师观察分别记录。':'AI 辅助，理解由你完成。'}</span></div></aside><main class="main"><header class="topbar"><div class="breadcrumb">${config.title} &nbsp; / &nbsp; <strong>${page?.title||''}</strong></div><div class="profile">${accountSession.enabled ? `<a href="/?account=1">${esc(accountSession.learnerName ? '学生：'+accountSession.learnerName : accountSession.principal.name || '匿名 · 登录/注册')}</a>` : `<div class="workspace-switch" role="group" aria-label="切换工作台">${[['student','学生'],['teacher','教师']].map(([id,label])=>`<button type="button" data-workspace-switch="${id}" aria-pressed="${workspace===id}" ${workspace===id?'class="selected"':''}>${label}</button>`).join('')}</div>`}<span class="local-profile"><span class="dot"></span> 本机体验</span></div></header><div class="content">${content}<div class="footer-note">DevLabs α · 测试通过与能力掌握分别记录。独立性由现场变式与追问复核，本机记录不作为认证成绩。</div></div></main></div>`;
 }
 function rememberWorkspaceDraft() {
   if (!['pilot','review'].includes(view)) return;
@@ -67,8 +71,8 @@ async function navigateWorkspace(nextWorkspace, nextView) {
     await action(async()=>{
       await refresh();
       workspaceViews[workspace]=view;
-      workspace=nextWorkspace;view=nextView;if(workspace==='teacher')history.replaceState(null,'',location.pathname);workspaceViews[workspace]=view;
-      localStorage.setItem('devlabs-workspace',workspace);
+      workspace=nextWorkspace;view=nextView;if(!accountSession.learnerId&&(workspace==='teacher'||view==='club'))history.replaceState(null,'',location.pathname);workspaceViews[workspace]=view;
+      deviceStore.setItem('devlabs-workspace',workspace);
     });
   } catch(e) {toast(e.message);}
   finally {navigating=false;}
@@ -261,7 +265,7 @@ function review() {
 function render() {
   viewController?.dispose();viewController=null;
   view=workspacePage(workspace,view);
-  $('#app').innerHTML = layout(view === 'teaching' ? teachingMarkup() : view === 'overview' ? teacherOverview(data) : view === 'route' ? routeMarkup() : view === 'unit' ? unitMarkup() : view === 'learn' ? learn() : view === 'evidence' ? evidence() : view === 'pilot' ? pilot() : review());
+  $('#app').innerHTML = layout(view === 'club' ? '<div id="club-root" aria-live="polite">正在打开报名项目…</div>' : view === 'teaching' ? teachingMarkup() : view === 'overview' ? teacherOverview(data) : view === 'route' ? routeMarkup() : view === 'unit' ? unitMarkup() : view === 'learn' ? learn() : view === 'evidence' ? evidence() : view === 'pilot' ? pilot() : review());
   bind();
   restoreWorkspaceDraft();
   if (running) document.querySelectorAll('button').forEach(b => b.disabled = true);
@@ -275,13 +279,34 @@ async function action(fn) {
   finally { running = false; render(); }
 }
 function bind() {
+  if(accountSession.enabled) document.querySelectorAll('a[href="/api/export"]').forEach(link=>{
+    link.addEventListener('click',async event=>{
+      event.preventDefault();
+      try {
+        const response=await apiFetch('/api/export');
+        if(!response.ok) throw new Error((await response.json()).error);
+        const objectUrl=URL.createObjectURL(await response.blob());
+        const download=document.createElement('a');
+        download.href=objectUrl;
+        download.download='devlabs-evidence.json';
+        download.click();
+        setTimeout(()=>URL.revokeObjectURL(objectUrl),1000);
+      } catch(error) { toast(error.message); }
+    });
+  });
   document.querySelectorAll('[data-view]').forEach(b => b.onclick = () => navigateWorkspace(workspace,b.dataset.view));
   document.querySelectorAll('[data-teaching-unit]').forEach(b=>b.onclick=()=>{teacherUnit=b.dataset.teachingUnit;navigateWorkspace('teacher','teaching');});
   document.querySelectorAll('[data-teacher-practice]').forEach(b=>b.onclick=()=>{pendingTeacherAssignment=b.dataset.teacherPractice;navigateWorkspace('student','route');});
   document.querySelectorAll('[data-workspace-switch]').forEach(b=>b.onclick=()=>navigateWorkspace(b.dataset.workspaceSwitch));
   document.querySelectorAll('[data-stage]').forEach(b => b.onclick = () => switchTask(data.tasks.find(t => t.stage === b.dataset.stage && !submitted(t).length)?.id || data.tasks.find(t => t.stage === b.dataset.stage).id));
   document.querySelectorAll('[data-task]').forEach(b => b.onclick = () => switchTask(b.dataset.task));
-  if(view==='teaching'){viewController=bindTeaching({unitId:teacherUnit,onUnitChange:id=>{teacherUnit=id;localStorage.setItem('devlabs-teacher-unit',id);}});return;}
+  $('#club-feedback-form')?.addEventListener('submit',event=>{
+    event.preventDefault();
+    const note=new FormData(event.currentTarget).get('note');
+    action(async()=>{await post('/api/club-feedback',{note});await refresh();toast('已发送给该学生');});
+  });
+  if(view==='club'){viewController=bindClub({post,onRoute:()=>navigateWorkspace('student','route')});return;}
+  if(view==='teaching'){viewController=bindTeaching({unitId:teacherUnit,onUnitChange:id=>{teacherUnit=id;deviceStore.setItem('devlabs-teacher-unit',id);}});return;}
   if(view==='route'){viewController=bindRoute({assignmentId:pendingTeacherAssignment,labId:pendingLab});pendingTeacherAssignment=null;pendingLab=null;return;}
   if(view==='unit'){bindUnit();return;}
   if (view === 'pilot') {
@@ -317,7 +342,7 @@ function bind() {
   if ($('#hint')) $('#hint').onclick = () => action(async () => { await post('/api/hint', { id: current }); await refresh(); });
   if ($('#ai')) $('#ai').onclick = () => { const question = $('#ai-question').value; action(async () => { const result = await post('/api/ai', { id: current, code: draft().code, question }); aiAnswer = result.answer + '\n\n' + result.note; await refresh(); }); };
   if ($('#reset-code')) $('#reset-code').onclick = () => { if (!confirm('恢复当前代码会替换你的编辑，已有运行证据会保留。继续？')) return; action(async () => {
-    if (task().kind === 'project') { const response = await fetch(`/api/template?file=${encodeURIComponent(selectedFile)}`); const value = await response.json(); if (!response.ok) throw new Error(value.error); data.project[selectedFile] = value.content; dirtyFiles.set(selectedFile, value.content); await flush(); }
+    if (task().kind === 'project') { const response = await apiFetch(`/api/template?file=${encodeURIComponent(selectedFile)}`); const value = await response.json(); if (!response.ok) throw new Error(value.error); data.project[selectedFile] = value.content; dirtyFiles.set(selectedFile, value.content); await flush(); }
     else { draft().code = task().starter; draft().prediction = ''; await flush(); }
     latest = null;
   }); };
@@ -325,12 +350,12 @@ function bind() {
   if ($('#retest')) $('#retest').onclick = () => action(async () => { await post('/api/retest', { id: current }); if (task().kind !== 'project') { draftMemory[current] = { code: task().starter, prediction: '', explanation: '', checkAnswer: '' }; await flush(); } latest = null; helpOpen = false; await refresh(); toast('延迟复测已开始，请独立完成'); });
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden && pendingAdvance) { cancelAdvance(); if (data && view === 'learn') updateFlow(); } });
-async function switchTask(id) { await action(async () => { await post('/api/learning',{id,action:'enter'}); current = id; selectedFile = data.tasks.find(t => t.id === id).file || ''; latest = null; aiAnswer = ''; helpOpen = false; localStorage.setItem('devlabs-current', id); }); showArrival('next'); }
+async function switchTask(id) { await action(async () => { await post('/api/learning',{id,action:'enter'}); current = id; selectedFile = data.tasks.find(t => t.id === id).file || ''; latest = null; aiAnswer = ''; helpOpen = false; deviceStore.setItem('devlabs-current', id); }); showArrival('next'); }
 try {
   await refresh();
   if (!data.state.attempts.length && !Object.keys(data.state.drafts).length) current = data.tasks[0].id;
   const arrival = resumeJourney(data.tasks, data.state, data.state.activeTaskId || current);
-  current = arrival.taskId; localStorage.setItem('devlabs-current', current);
+  current = arrival.taskId; deviceStore.setItem('devlabs-current', current);
   selectedFile = task().file || '';
   if(view==='learn') await post('/api/learning',{id:current,action:'enter'});
   if (arrival.reason === 'complete' && view==='learn') view = 'evidence';
